@@ -19,12 +19,15 @@ const (
 )
 
 func ensureExist(dir string) error {
-	_, err := os.Stat(dir)
+	s, err := os.Stat(dir)
 	if os.IsNotExist(err) {
 		// does not exist create one
-		os.MkdirAll(dir, permission)
+		return os.MkdirAll(dir, permission)
 	} else if err != nil {
 		return err
+	}
+	if !s.IsDir() {
+		return fmt.Errorf("%q is not a directory", dir)
 	}
 	return nil
 }
@@ -67,6 +70,7 @@ func NewFileSystemCache(cacheDir string, maxSize int) (*fileSystemCache, error) 
 		store:    make(map[string]*finfo),
 		toRemove: make(chan string, channelBuffer),
 		toTouch:  make(chan string, channelBuffer),
+		logger:   log.Default(),
 	}
 	for _, fi := range files {
 		if fsc.total > fsc.MaxSize {
@@ -101,6 +105,7 @@ type fileSystemCache struct {
 	mx       sync.Mutex
 	toRemove chan string
 	toTouch  chan string
+	logger   *log.Logger
 }
 
 type finfo struct {
@@ -161,6 +166,12 @@ func (fs *fileSystemCache) Put(ctx context.Context, key string, r io.Reader) (er
 		key:  key,
 		size: int(n),
 	})
+	// ensure we stay within size limit.
+	for fs.total > fs.MaxSize {
+		toRemove := fs.last
+		fs.remove(toRemove)
+		fs.rmFileForKey(toRemove.key)
+	}
 	fs.mx.Unlock()
 	return nil
 }
@@ -200,8 +211,6 @@ func (fs *fileSystemCache) housekeeper() {
 			// touch the file
 			currentTime := time.Now().Local()
 			os.Chtimes(name, currentTime, currentTime)
-		case <-ticker.C:
-			fs.ensureSize()
 		}
 	}
 }
@@ -216,17 +225,6 @@ func (fs *fileSystemCache) touchFileForKey(key string) {
 
 func (fs *fileSystemCache) fname(key string) string {
 	return path.Join(fs.base, key)
-}
-
-// remove the latest items until the total size is bellow MaxSize
-func (fs *fileSystemCache) ensureSize() {
-	for fs.total > fs.MaxSize {
-		toRemove := fs.last
-		fs.mx.Lock()
-		fs.remove(toRemove)
-		fs.mx.Unlock()
-		fs.rmFileForKey(toRemove.key)
-	}
 }
 
 // insert put an item in the begining of the list. It is not thread safe.
